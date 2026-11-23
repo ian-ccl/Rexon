@@ -1,0 +1,123 @@
+import a;
+enum TestResult {
+    Passed,
+    Failed
+}
+
+struct Counter {
+    int value = 0;
+
+    fn increment() {
+        this.value += 1;
+    }
+
+    fn get() int {
+        return this.value;
+    }
+
+    static fn create(int initial) Counter {
+        return Counter{initial};
+    }
+}
+
+fn add(int a, int b) int {
+    return a + b;
+}
+
+fn divide(int a, int b, int* error) int? {
+    if (b == 0) {
+        *error = 1;
+        return null;
+    }
+
+    *error = 0;
+    return a / b;
+}
+
+fn assert_equal(int actual, int expected, const char* name) bool {
+    if (actual != expected) {
+        @print("[FAIL] {}: expected {}, got {}\n",
+            name, expected, actual);
+        return false;
+    }
+
+    @print("[PASS] {}\n", name);
+    return true;
+}
+
+test "arithmetic and optionals" {
+    int# expected = 30;
+    @assert(add(10, 20) == expected, "constant declaration");
+    @assert(10 % 3 == 1, "modulo");
+
+    Counter counter = Counter::create(10);
+    counter.increment();
+    @assert(counter.get() == 11, "struct method");
+
+    int err = 0;
+    int? result = divide(20, 4, &err);
+    @assert(result && err == 0 && result.? == 5, "optional success");
+
+    int? invalid = divide(20, 0, &err);
+    @assert(!invalid && err == 1, "optional failure");
+}
+
+test "arrays pointers and strings" {
+    int[4] numbers = {10, 20, 30, 40};
+    @assert(numbers[2] == 30, "static array");
+
+    int value = 42;
+    int* ptr = &value;
+    @assert(*ptr == 42, "pointer");
+
+    const char[6] text = "Rexon";
+    @assert(@cast(int, text[0]) == 82, "string contents");
+
+    const char[26] multiline =
+        \ linea 1
+        \linea 2
+        \linea 3
+    ;
+
+    @print("Multiline:\n{}\n", multiline);
+
+    @cpp(
+        \#include <type_traits>
+        \static_assert(std::is_same_v<std::remove_extent_t<std::remove_reference_t<decltype("Rexon")>>, const char>);
+    )
+}
+
+test "mbool" {
+    mbool b = maybe;
+    for (size_t i = 0; i < 10; i++)
+        @print("{}", b);
+    b = true;
+    @assert(b, "mbool true Error");
+    b = false;
+    @assert(!b, "mbool false Error");
+}   
+
+test "dynamic memory" {
+    bool ok = false;
+    int* ptr = new(&ok) int{10};
+    @assert(ok && ptr != nullptr && *ptr == 10, "new scalar");
+    delete ptr;
+    delete ptr;
+
+    int[] values = new(&ok) int[]{10, 20, 30};
+    @assert(ok && values.size == 3, "new array");
+    resize(&ok) int[+3]{values, 40, 50};
+    @assert(ok && values.size == 6 && values[0] == 10 && values[4] == 50,
+            "resize array");
+    resize(&ok) int[+18446744073709551615]{values};
+    @assert(!ok && values.size == 6 && values[4] == 50,
+            "resize allocation failure");
+    delete values;
+    delete values;
+
+    int* default_value = new(&ok) int{};
+    @assert(ok && *default_value == 0, "default scalar");
+    delete default_value;
+    int* null_ptr = nullptr;
+    delete null_ptr;
+}

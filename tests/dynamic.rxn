@@ -1,0 +1,24 @@
+test "dynamic memory" {
+    bool ok = false;
+    int* ptr = new(&ok) int{10};
+    @assert(ok && ptr != nullptr && *ptr == 10, "new scalar");
+    delete ptr;
+    delete ptr;
+
+    int[] values = new(&ok) int[]{10, 20, 30};
+    @assert(ok && values.size == 3, "new array");
+    resize(&ok) int[+3]{values, 40, 50};
+    @assert(ok && values.size == 6 && values[0] == 10 && values[4] == 50,
+            "resize array");
+    resize(&ok) int[+18446744073709551615]{values};
+    @assert(!ok && values.size == 6 && values[4] == 50,
+            "resize allocation failure");
+    delete values;
+    delete values;
+
+    int* failed = new(&ok) int{};
+    @assert(ok && *failed == 0, "default scalar");
+    delete failed;
+    int* null_ptr = nullptr;
+    delete null_ptr;
+}
