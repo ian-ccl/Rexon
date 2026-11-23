@@ -22,8 +22,9 @@ También se puede generar el header estándar incluido por Rexon:
 Guarda el siguiente código como `hello.rxn`:
 
 ```rexon
-fn main() {
+fn main(char[][] args) {
     @print("Hola, {}!\n", "Rexon");
+    @print("Ejecutable: {}\n", args[0]);
 }
 ```
 
@@ -46,6 +47,22 @@ Para conservar el C++ generado, usa `--emit-cpp`:
 ## Sintaxis básica
 
 La sintaxis es intencionalmente cercana a C++.
+
+### Punto de entrada
+
+El punto de entrada recomendado es `fn main(char[][] args)`. `args` contiene
+los argumentos de la línea de comandos como un array dinámico de strings; el
+primer elemento (`args[0]`) es el nombre del ejecutable. También se acepta
+`fn main()` cuando no se necesitan argumentos. Si se omite el tipo de retorno,
+`main` retorna `int` automáticamente.
+
+```rexon
+fn main(char[][] args) {
+    if (args.size() > 1 && args.is_valid_idx(1)) {
+        @print("Primer argumento: {}\n", args[1]);
+    }
+}
+```
 
 ### Funciones
 
@@ -191,9 +208,17 @@ resize(&ok) int[+2]{values, 40, 50};
 delete values;
 ```
 
-`int[]` representa un array dinámico con los campos `.data` y `.size`.
+`int[]` representa un array dinámico con los campos `.data` y `.size`. También
+dispone de `.size()` e `.is_valid_idx(i)` para consultar su tamaño y validar un
+índice antes de accederlo. Los arrays fijos ofrecen las mismas operaciones.
 `resize(&ok) int[+n]{array, valores...}` agrega `n` posiciones y puede
 inicializar algunas de ellas.
+
+```rexon
+int[3] fixed = {10, 20, 30};
+@assert(fixed.size() == 3, "fixed size");
+@assert(fixed.is_valid_idx(2) && !fixed.is_valid_idx(3), "fixed index");
+```
 
 ## Builtins con `@`
 

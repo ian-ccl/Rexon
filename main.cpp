@@ -48,13 +48,40 @@ namespace rexon {
     inline bool test_mode = false;
     // C's `int` type, exposed explicitly for C interop declarations.
     using c_int = int;
+
+    // Callable size value: it keeps the legacy `.size` field syntax working
+    // while also allowing the method-style `.size()` API.
+    struct SizeValue {
+        std::size_t value{};
+        constexpr SizeValue() = default;
+        constexpr SizeValue(std::size_t v) : value(v) {}
+        constexpr operator std::size_t() const { return value; }
+        constexpr std::size_t operator()() const { return value; }
+        constexpr SizeValue& operator=(std::size_t v) {
+            value = v;
+            return *this;
+        }
+    };
+
     template<class T>
     struct Slice {
         T* data{};
-        std::size_t size{};
+        SizeValue size{};
         T& operator[](std::size_t i) const { return data[i]; }
         T* begin() const { return data; }
         T* end() const { return data + size; }
+        constexpr bool is_valid_idx(std::size_t i) const { return i < size(); }
+        friend std::ostream& operator<<(std::ostream& os, const Slice& slice) {
+            if constexpr (std::is_same_v<std::remove_cv_t<T>, char>) {
+                for (std::size_t i = 0; i < slice.size; ++i) os << slice.data[i];
+            } else {
+                for (std::size_t i = 0; i < slice.size; ++i) {
+                    if (i) os << ", ";
+                    os << slice.data[i];
+                }
+            }
+            return os;
+        }
     };
 
     // Dynamic allocations carry a small header immediately before the user
@@ -215,6 +242,7 @@ namespace rexon {
             for (std::size_t i = 0; i < count; ++i) data[i] = v[i];
         }
         constexpr std::size_t size() const { return N; }
+        constexpr bool is_valid_idx(std::size_t i) const { return i < N; }
         T& operator[](std::size_t i) { return data[i]; }
         const T& operator[](std::size_t i) const { return data[i]; }
         friend std::ostream& operator<<(std::ostream& os, const Array& a) {
@@ -691,12 +719,13 @@ class Transpiler {
         if (last > first && t[last - 1].text == "?")
             return "std::optional<" + render_type(first, last - 1) + ">";
 
-        // T[N] -> rexon::Array<T, N>; T[] -> rexon::Slice<T>
+        // T[N] -> rexon::Array<T, N>; T[] -> rexon::Slice<T>.
+        // Recurse so types such as char[][] become Slice<Slice<char>>.
         if (last >= first + 2 && t[last - 1].text == "]") {
             std::size_t open = last - 2;
             while (open > first && t[open].text != "[") --open;
             if (t[open].text == "[") {
-                std::string base = render_type(first, open);
+                std::string base = convert_type(first, open);
                 std::string extent = render_type(open + 1, last - 1);
                 if (extent.empty()) return "rexon::Slice<" + base + ">";
                 return "rexon::Array<" + base + ", " + extent + ">";
@@ -1002,9 +1031,10 @@ class Transpiler {
         else emit(";\n");
     }
 
-    void parse_block() {
+    void parse_block(std::string_view prologue = {}) {
         if (!eat("{")) { error("expected '{'"); return; }
         emit("{\n");
+        emit(prologue);
         while (cur().kind != Kind::End && !is("}")) {
             auto before = i;
             parse_item();
@@ -1043,13 +1073,22 @@ class Transpiler {
             params += declaration(parts[n].first, parts[n].second);
         }
 
+        const bool main_with_args = name == "main" && parts.size() == 1 &&
+            convert_type(parts[0].first, parts[0].second - 1) ==
+                "rexon::Slice<rexon::Slice<char>>" &&
+            t[parts[0].second - 1].text == "args";
+
         std::size_t ret_first = i;
         while (cur().kind != Kind::End && !is("{") && !is(";")) ++i;
         std::string ret = ret_first == i ? "void" : convert_type(ret_first, i);
 
         if (is_static) emit("static ");
-        if (name == "main" && ret == "void")
-            emit("auto main() -> int ");
+        if (name == "main") {
+            if (main_with_args)
+                emit("auto main(int argc, char** argv) -> int ");
+            else
+                emit("auto main() -> int ");
+        }
         else
             emit("auto " + name + "(" + params + ") -> " + ret + " ");
 
@@ -1057,7 +1096,17 @@ class Transpiler {
             emit(";\n");
             return;
         }
-        parse_block();
+        if (main_with_args) {
+            parse_block(
+                "    std::vector<rexon::Slice<char>> __rexon_args_storage;\n"
+                "    __rexon_args_storage.reserve(static_cast<std::size_t>(argc));\n"
+                "    for (int i = 0; i < argc; ++i)\n"
+                "        __rexon_args_storage.push_back({argv[i], std::strlen(argv[i])});\n"
+                "    rexon::Slice<rexon::Slice<char>> args{\n"
+                "        __rexon_args_storage.data(), __rexon_args_storage.size()};\n");
+        } else {
+            parse_block();
+        }
     }
 
     void parse_test() {

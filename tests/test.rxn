@@ -64,7 +64,9 @@ test "arithmetic and optionals" {
 
 test "arrays pointers and strings" {
     int[4] numbers = {10, 20, 30, 40};
-    @assert(numbers[2] == 30, "static array");
+    @assert(numbers[2] == 30 && numbers.size() == 4 &&
+            numbers.is_valid_idx(3) && !numbers.is_valid_idx(4),
+            "static array size and index");
 
     int value = 42;
     int* ptr = &value;
@@ -105,7 +107,8 @@ test "dynamic memory" {
     delete ptr;
 
     int[] values = new(&ok) int[]{10, 20, 30};
-    @assert(ok && values.size == 3, "new array");
+    @assert(ok && values.size() == 3 && values.is_valid_idx(2) &&
+            !values.is_valid_idx(3), "new array size and index");
     resize(&ok) int[+3]{values, 40, 50};
     @assert(ok && values.size == 6 && values[0] == 10 && values[4] == 50,
             "resize array");
