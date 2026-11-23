@@ -46,6 +46,8 @@ static constexpr std::string_view std_hpp = R"REXON(
 
 namespace rexon {
     inline bool test_mode = false;
+    // C's `int` type, exposed explicitly for C interop declarations.
+    using c_int = int;
     template<class T>
     struct Slice {
         T* data{};
@@ -644,7 +646,8 @@ class Transpiler {
             // `#` is Rexon's constant type modifier and is not valid C++ syntax.
             if (t[k].text == "#") continue;
             if (previous && needs_space(*previous, t[k])) s += ' ';
-            s += token_text(t[k]);
+            if (t[k].text == "c_int") s += "rexon::c_int";
+            else s += token_text(t[k]);
             previous = &t[k];
         }
         return s;
@@ -677,6 +680,9 @@ class Transpiler {
 
     std::string convert_type(std::size_t first, std::size_t last) const {
         if (first >= last) return "void";
+
+        if (last == first + 1 && t[first].text == "c_int")
+            return "rexon::c_int";
 
         if (last == first + 1 && t[first].text == "mbool")
             return "rexon::mbool";
@@ -858,7 +864,7 @@ class Transpiler {
                         ident(t[args[1].first]) &&
                         optional_vars.contains(t[args[1].first].text))
                         value = "(*" + value + ")";
-                    s += "static_cast<" + arg(0) + ">(" + value + ")";
+                    s += "static_cast<" + convert_type(args[0].first, args[0].second) + ">(" + value + ")";
                 } else if (name == "print") {
                     s += "rexon::print(";
                     for (std::size_t n = 0; n < args.size(); ++n) {
@@ -959,7 +965,7 @@ class Transpiler {
                 ident(t[args[1].first]) &&
                 optional_vars.contains(t[args[1].first].text))
                 value = "(*" + value + ")";
-            emit("static_cast<" + arg(0) + ">(" + value + ")");
+            emit("static_cast<" + convert_type(args[0].first, args[0].second) + ">(" + value + ")");
         } else if (name == "print") {
             emit("rexon::print(");
             for (std::size_t n = 0; n < args.size(); ++n) {
