@@ -8,7 +8,7 @@ Rexon es un lenguaje pequeño que se transpila a C++26. El compilador se llama
 Desde este directorio:
 
 ```sh
-clang++ -std=c++26 -O2 main.cpp -o rexonc
+clang++ -std=c++26 -O2 main.cpp cli.cpp -o rexonc
 ```
 
 También se puede generar el header estándar incluido por Rexon:
