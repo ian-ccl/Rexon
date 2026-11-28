@@ -3,12 +3,19 @@
 
 namespace rexon_compiler {
 
-static const char* version = "0.3.0";
+static const char* version = "1.0.0";
 
 static void print_diagnostics(const std::vector<Diagnostic>& ds) {
     for (const auto& d : ds)
         std::cerr << d.file.string() << ':' << d.line << ':' << d.column
                   << ": error: " << d.message << '\n';
+}
+
+static bool is_object_output(const fs::path& output) {
+    std::string extension = output.extension().string();
+    std::ranges::transform(extension, extension.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension == ".o" || extension == ".obj";
 }
 
 static std::optional<fs::path> resolve_lang(const fs::path& name,
@@ -48,7 +55,8 @@ static void collect_modules(const fs::path& file,
     // emits each module once; declarations are available through C++ headers.
     std::vector<Token> toks = Lexer(src, file, errors).run();
     for (std::size_t i = 0; i + 1 < toks.size(); ++i) {
-        if (toks[i].text == "import" && toks[i + 1].kind == Kind::Identifier) {
+        if (toks[i].text == "import" &&
+            (toks[i + 1].kind == Kind::Identifier || toks[i + 1].kind == Kind::String)) {
             auto dep = resolve_lang(toks[i + 1].text, file, include_dirs, cwd);
             if (!dep) {
                 errors.push_back({file, toks[i].line, toks[i].column,
@@ -71,7 +79,10 @@ static std::optional<Options> parse_args(int argc, char** argv) {
         } else if (a == "-o") {
             if (++i >= argc) { std::cerr << "rexon: -o requires a path\n"; return {}; }
             o.output = argv[i];
-        } else if (a == "--get-std-hpp") o.get_std_hpp = true;
+        } else if (a == "-c") o.compile_only = true;
+        else if (a == "--get-std-hpp") o.get_std_hpp = true;
+        else if (a == "--version" || a == "-V") o.print_version = true;
+        else if (a == "--check") o.check_only = true;
         else if (a == "--emit-cpp") o.emit_cpp = true;
         else if (a == "--keep-temp") o.keep_temp = true;
         else if (a == "--tokens") o.print_tokens = true;
@@ -92,10 +103,10 @@ static std::optional<Options> parse_args(int argc, char** argv) {
             o.clang_args.push_back(a);
         }
     }
-    if (o.get_std_hpp) return o;
+    if (o.get_std_hpp || o.print_version) return o;
     if (o.input.empty()) {
-        std::cerr << "usage: rexon [-I dir] [-o output] [--test [--unique-test name]] "
-                     "[--emit-cpp] [--get-std-hpp] file.rxn [clang++ flags...]\n";
+        std::cerr << "usage: rexonc [-I dir] [-o output] [--test [--unique-test name]] "
+                     "[--check] [--emit-cpp] [--get-std-hpp] file.rxn [clang++ flags...]\n";
         return {};
     }
     if (o.output.empty()) {
@@ -103,6 +114,8 @@ static std::optional<Options> parse_args(int argc, char** argv) {
 
         if (o.emit_cpp)
             default_output.replace_extension(".cpp");
+        else if (o.compile_only)
+            default_output.replace_extension(".o");
         else
             default_output.replace_extension("");
 
@@ -117,9 +130,18 @@ int run(int argc, char** argv) {
     auto parsed = parse_args(argc, argv);
     if (!parsed) return 2;
     Options opt = *parsed;
+    if (opt.print_version) {
+        std::cout << "rexonc " << version << '\n';
+        return 0;
+    }
     if (opt.get_std_hpp) {
         std::cout << rexon_sources::std_hpp;
         return 0;
+    }
+    const bool object_output = opt.compile_only || is_object_output(opt.output);
+    if (object_output && opt.run_tests) {
+        std::cerr << "rexon: --test cannot be used when -o names an object file\n";
+        return 2;
     }
     const fs::path cwd = fs::current_path();
 
@@ -152,6 +174,11 @@ int run(int argc, char** argv) {
         combined << tr.run() << "\n";
     }
     if (!errors.empty()) { print_diagnostics(errors); return 1; }
+
+    if (opt.check_only) {
+        std::cout << opt.input.string() << ": syntax and semantic checks passed\n";
+        return 0;
+    }
 
     if (opt.run_tests) {
         if (tests.empty()) {
@@ -205,8 +232,12 @@ int run(int argc, char** argv) {
     }
 
     std::string command = "clang++ ";
+    if (object_output) command += "-c ";
     command += shell_quote(generated.string()) + " ";
-    command += shell_quote(stdcpp.string()) + " ";
+    // The runtime is header-only from the generated translation unit's point
+    // of view.  Do not pass std.cpp in object mode: clang++ cannot emit one
+    // object file from two source files with a single -o path.
+    if (!object_output) command += shell_quote(stdcpp.string()) + " ";
     command += "-I" + shell_quote(tempdir.string()) + " ";
     command += "-I" + shell_quote(cwd.string()) + " ";
     command += std::format("-Drexon_version={} ", version);

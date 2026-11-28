@@ -29,10 +29,13 @@ struct Options {
     std::vector<fs::path> include_dirs;
     std::vector<std::string> clang_args;
     bool get_std_hpp = false;
+    bool compile_only = false;
     bool emit_cpp = false;
     bool keep_temp = false;
     bool print_tokens = false;
     bool run_tests = false;
+    bool check_only = false;
+    bool print_version = false;
     std::optional<std::string> unique_test;
 };
 
@@ -163,7 +166,12 @@ class Transpiler {
             // `#` is Rexon's constant type modifier and is not valid C++ syntax.
             if (t[k].text == "#") continue;
             if (previous && needs_space(*previous, t[k])) s += ' ';
-            if (t[k].text == "c_int") s += "rexon::c_int";
+            if (t[k].text == "int") s += "std::int64_t";
+            else if (t[k].text == "uint") s += "std::uint64_t";
+            else if (t[k].text == "float" || t[k].text == "double") s += "double";
+            else if (t[k].text == "size_t") s += "std::size_t";
+            else if (t[k].text == "ssize_t") s += "rexon::ssize_t";
+            else if (t[k].text == "c_int") s += "rexon::c_int";
             else s += token_text(t[k]);
             previous = &t[k];
         }
@@ -174,7 +182,7 @@ class Transpiler {
         std::size_t first, std::size_t last) const {
         std::vector<std::pair<std::size_t, std::size_t>> parts;
         std::size_t start = first;
-        int paren = 0, bracket = 0, brace = 0, angle = 0;
+        int paren = 0, bracket = 0, brace = 0;
         for (std::size_t k = first; k < last; ++k) {
             const auto& x = t[k].text;
             if (x == "(") ++paren;
@@ -183,10 +191,8 @@ class Transpiler {
             else if (x == "]") --bracket;
             else if (x == "{") ++brace;
             else if (x == "}") --brace;
-            else if (x == "<") ++angle;
-            else if (x == ">" && angle > 0) --angle;
             else if (x == "," && paren == 0 && bracket == 0 &&
-                     brace == 0 && angle == 0) {
+                     brace == 0) {
                 parts.emplace_back(start, k);
                 start = k + 1;
             }
@@ -197,9 +203,6 @@ class Transpiler {
 
     std::string convert_type(std::size_t first, std::size_t last) const {
         if (first >= last) return "void";
-
-        if (last == first + 1 && t[first].text == "c_int")
-            return "rexon::c_int";
 
         if (last == first + 1 && t[first].text == "mbool")
             return "rexon::mbool";
@@ -215,6 +218,13 @@ class Transpiler {
             while (open > first && t[open].text != "[") --open;
             if (t[open].text == "[") {
                 std::string base = convert_type(first, open);
+                const bool constant_elements = std::any_of(
+                    t.begin() + first, t.begin() + open,
+                    [](const Token& token) { return token.text == "#"; });
+                if (constant_elements && !base.starts_with("const ") &&
+                    !base.starts_with("rexon::Slice<") &&
+                    !base.starts_with("rexon::Array<"))
+                    base = "const " + base;
                 std::string extent = render_type(open + 1, last - 1);
                 if (extent.empty()) return "rexon::Slice<" + base + ">";
                 return "rexon::Array<" + base + ", " + extent + ">";
@@ -247,7 +257,9 @@ class Transpiler {
                                              [](const Token& token) {
                                                  return token.text == "#";
                                              });
-        if (is_constant && !type.starts_with("const ")) type = type + " const";
+        if (is_constant && !type.starts_with("const ") &&
+            !type.starts_with("rexon::Slice<") && !type.starts_with("rexon::Array<"))
+            type = type + " const";
         std::string var = t[name_index].text;
 
         // C-style suffix in Rexon type syntax: int[4] values -> int values[4].
@@ -268,6 +280,59 @@ class Transpiler {
         std::string s;
         const Token* previous = nullptr;
         for (std::size_t k = first; k < last;) {
+            // Anonymous Rexon functions become capturing C++ lambdas. The
+            // explicit Rexon return type is kept as a trailing C++ return
+            // type, while the body is rendered by the normal expression
+            // lowering path so builtins such as @print still work.
+            if (t[k].text == "fn" && k + 1 < last && t[k + 1].text == "(") {
+                int depth = 0;
+                std::size_t close = k + 1;
+                for (; close < last; ++close) {
+                    if (t[close].text == "(") ++depth;
+                    else if (t[close].text == ")" && --depth == 0) break;
+                }
+                if (close < last) {
+                    std::size_t brace = close + 1;
+                    while (brace < last && t[brace].text != "{") ++brace;
+                    if (brace < last) {
+                        int braces = 0;
+                        std::size_t brace_close = brace;
+                        for (; brace_close < last; ++brace_close) {
+                            if (t[brace_close].text == "{") ++braces;
+                            else if (t[brace_close].text == "}" && --braces == 0) break;
+                        }
+                        if (brace_close < last) {
+                            std::string params;
+                            for (const auto& part : split_args(k + 2, close)) {
+                                if (part.first >= part.second) continue;
+                                if (!params.empty()) params += ", ";
+                                std::size_t name = part.second;
+                                while (name > part.first && t[name - 1].kind != Kind::Identifier) --name;
+                                if (name == part.first) {
+                                    errors.push_back({file, t[k].line, t[k].column,
+                                                      "lambda parameter requires a name"});
+                                    params += render(part.first, part.second);
+                                } else {
+                                    const auto name_index = name - 1;
+                                    const auto type = name_index == part.first
+                                        ? std::string("auto")
+                                        : convert_type(part.first, name_index);
+                                    params += type + " " + t[name_index].text;
+                                }
+                            }
+                            std::string ret = brace == close + 1
+                                ? "void" : convert_type(close + 1, brace);
+                            s += "[&](" + params + ") -> " + ret + " {";
+                            if (brace + 1 < brace_close)
+                                s += render_expr(brace + 1, brace_close);
+                            s += "}";
+                            k = brace_close + 1;
+                            previous = nullptr;
+                            continue;
+                        }
+                    }
+                }
+            }
             // Rexon dynamic memory syntax is lowered here, after lexing and
             // parsing its delimiters, rather than by textual replacement.
             if (t[k].text == "new" || t[k].text == "resize" || t[k].text == "delete") {
@@ -370,6 +435,8 @@ class Transpiler {
                     s += render(k, last);
                     break;
                 }
+                if (previous && (wordlike(*previous) || previous->text == ")"))
+                    s += ' ';
                 auto args = split_args(open + 1, close);
                 auto arg = [&](std::size_t n) -> std::string {
                     if (n >= args.size()) return {};
@@ -393,6 +460,31 @@ class Transpiler {
                 } else if (name == "assert" && !args.empty()) {
                     s += "rexon::assert_that((" + arg(0) + "), " +
                          (args.size() > 1 ? arg(1) : cpp_quote("assertion failed")) + ")";
+                } else if (name == "getline" && args.empty()) {
+                    s += "rexon::getline()";
+                } else if (name == "shell" && (args.size() == 1 || args.size() == 2)) {
+                    s += "rexon::shell(";
+                    for (std::size_t n = 0; n < args.size(); ++n) {
+                        if (n) s += ", ";
+                        s += arg(n);
+                    }
+                    s += ")";
+                } else if ((name == "fexits" || name == "fexists") && args.size() == 1) {
+                    s += "rexon::fexists(" + arg(0) + ")";
+                } else if (name == "fread" && args.size() == 1) {
+                    s += "rexon::fread_all(" + arg(0) + ")";
+                } else if ((name == "fwrite" || name == "fappend") && args.size() == 2) {
+                    s += "rexon::" + name + "_all(" + arg(0) + ", " + arg(1) + ")";
+                } else if (name == "cwd" && args.empty()) {
+                    s += "rexon::cwd()";
+                } else if (name == "env" && args.size() == 1) {
+                    s += "rexon::env(" + arg(0) + ")";
+                } else if (name == "mkdir" && args.size() == 1) {
+                    s += "rexon::mkdir_all(" + arg(0) + ")";
+                } else if (name == "remove" && args.size() == 1) {
+                    s += "rexon::remove_file(" + arg(0) + ")";
+                } else if (name == "sleep" && args.size() == 1) {
+                    s += "rexon::sleep_ms(" + arg(0) + ")";
                 } else if (name == "exit") {
                     s += "std::exit(" + arg(0) + ")";
                 } else {
@@ -499,16 +591,70 @@ class Transpiler {
             }
             emit("rexon::assert_that((" + arg(0) + "), " +
                  (args.size() > 1 ? arg(1) : cpp_quote("assertion failed")) + ")");
+        } else if (name == "getline") {
+            if (!args.empty()) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@getline requires no arguments"});
+                return;
+            }
+            emit("rexon::getline()");
+        } else if (name == "shell") {
+            if (args.size() != 1 && args.size() != 2) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@shell requires a command or a shell and a command"});
+                return;
+            }
+            emit("rexon::shell(");
+            for (std::size_t n = 0; n < args.size(); ++n) {
+                if (n) emit(", ");
+                emit(arg(n));
+            }
+            emit(")");
         } else if (name == "exit") {
             emit("std::exit(" + arg(0) + ")");
-        } else if (name == "fexits") {
-            emit("rexon::fexits(" + arg(0) + ")");
+        } else if (name == "fexits" || name == "fexists") {
+            emit("rexon::fexists(" + arg(0) + ")");
         } else if (name == "fread") {
             emit("rexon::fread_all(" + arg(0) + ")");
         } else if (name == "fwrite") {
             emit("rexon::fwrite_all(" + arg(0) + ", " + arg(1) + ")");
         } else if (name == "fappend") {
             emit("rexon::fappend_all(" + arg(0) + ", " + arg(1) + ")");
+        } else if (name == "cwd") {
+            if (!args.empty()) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@cwd requires no arguments"});
+                return;
+            }
+            emit("rexon::cwd()");
+        } else if (name == "env") {
+            if (args.size() != 1) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@env requires one argument"});
+                return;
+            }
+            emit("rexon::env(" + arg(0) + ")");
+        } else if (name == "mkdir") {
+            if (args.size() != 1) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@mkdir requires one argument"});
+                return;
+            }
+            emit("rexon::mkdir_all(" + arg(0) + ")");
+        } else if (name == "remove") {
+            if (args.size() != 1) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@remove requires one argument"});
+                return;
+            }
+            emit("rexon::remove_file(" + arg(0) + ")");
+        } else if (name == "sleep") {
+            if (args.size() != 1) {
+                errors.push_back({file, t[at].line, t[at].column,
+                                  "@sleep requires one argument"});
+                return;
+            }
+            emit("rexon::sleep_ms(" + arg(0) + ")");
         } else if (name == "embeb") {
             errors.push_back({file, t[at].line, t[at].column,
                               "@embeb must be handled by the compile-time file embedding pass"});
@@ -690,12 +836,98 @@ class Transpiler {
         eat(";");
     }
 
+    void parse_cinclude() {
+        const auto include_token = cur();
+        eat("cinclude");
+
+        if (cur().kind == Kind::String) {
+            emit("#include \"" + cur().text + "\"\n");
+            ++i;
+            if (!eat(";")) error("expected ';' after cinclude");
+            return;
+        }
+
+        if (eat("<")) {
+            std::string header;
+            while (cur().kind != Kind::End && !is(">")) {
+                if (cur().line != include_token.line && header.empty()) {
+                    errors.push_back({file, include_token.line, include_token.column,
+                                      "unterminated cinclude angle header"});
+                    return;
+                }
+                header += cur().text;
+                ++i;
+            }
+            if (header.empty() || !eat(">")) {
+                errors.push_back({file, include_token.line, include_token.column,
+                                  "expected '<file>' after cinclude"});
+                return;
+            }
+            emit("#include <" + header + ">\n");
+            if (!eat(";")) error("expected ';' after cinclude");
+            return;
+        }
+
+        errors.push_back({file, include_token.line, include_token.column,
+                          "cinclude requires a quoted or angle-bracket header"});
+    }
+
     void parse_control() {
         std::size_t start = i;
+        if (t[start].text == "for" && start + 1 < t.size() && t[start + 1].text == "(") {
+            std::size_t close = start + 1;
+            int depth = 0;
+            for (; close < t.size(); ++close) {
+                if (t[close].text == "(") ++depth;
+                else if (t[close].text == ")" && --depth == 0) break;
+            }
+            if (close < t.size()) {
+                std::string header = "for (";
+                std::size_t part = start + 2;
+                int nested = 0;
+                for (std::size_t k = part; k < close; ++k) {
+                    if (t[k].text == "(" || t[k].text == "[" || t[k].text == "{") ++nested;
+                    else if (t[k].text == ")" || t[k].text == "]" || t[k].text == "}") --nested;
+                    if (t[k].text == ";" && nested == 0) {
+                        header += render_statement_fragment(part, k) + "; ";
+                        part = k + 1;
+                    }
+                }
+                header += render_statement_fragment(part, close);
+                emit(header + ")");
+                i = close + 1;
+                if (is("{")) parse_block();
+                else if (eat(";")) emit(";\n");
+                return;
+            }
+        }
         while (cur().kind != Kind::End && !is("{") && !is(";")) ++i;
         emit(render_expr(start, i));
         if (is("{")) parse_block();
         else if (eat(";")) emit(";\n");
+    }
+
+    bool looks_like_declaration(std::size_t start, std::size_t last) const {
+        if (start + 1 >= last || !ident(t[start])) return false;
+        if (t[start].text == "return" || t[start].text == "break" ||
+            t[start].text == "continue" || t[start].text == "if" ||
+            t[start].text == "while" || t[start].text == "for" ||
+            t[start].text == "switch" || t[start].text == "new" ||
+            t[start].text == "delete" || t[start].text == "resize") return false;
+        std::size_t k = start + 1;
+        while (k < last && (t[k].text == "*" || t[k].text == "#" ||
+               t[k].text == "?" || t[k].text == "[" ||
+               t[k].kind == Kind::Number || t[k].text == "]" ||
+               t[k].kind == Kind::Identifier)) {
+            if (t[k].kind == Kind::Identifier) return true;
+            ++k;
+        }
+        return false;
+    }
+
+    std::string render_statement_fragment(std::size_t first, std::size_t last) {
+        return looks_like_declaration(first, last) ? declaration(first, last)
+                                                   : render_expr(first, last);
     }
 
     void parse_defer() {
@@ -749,27 +981,7 @@ class Transpiler {
         std::string s;
         // A declaration begins with a type-like sequence and has an identifier
         // before its initializer. Handle optional and fixed-array suffixes.
-        bool looks_decl = false;
-        if (start + 1 < last && ident(t[start])) {
-            if (t[start].text == "return" || t[start].text == "break" ||
-                t[start].text == "continue" || t[start].text == "if" ||
-                t[start].text == "while" || t[start].text == "for" ||
-                t[start].text == "switch" || t[start].text == "new" ||
-                t[start].text == "delete" || t[start].text == "resize") {
-                looks_decl = false;
-            } else {
-            std::size_t k = start + 1;
-            while (k < last && (t[k].text == "*" || t[k].text == "#" ||
-                   t[k].text == "?" || t[k].text == "[" ||
-                   t[k].kind == Kind::Number || t[k].text == "]" ||
-                   t[k].kind == Kind::Identifier)) {
-                if (t[k].kind == Kind::Identifier) { looks_decl = true; break; }
-                ++k;
-            }
-            }
-        }
-        if (looks_decl) s = declaration(start, last);
-        else s = render_expr(start, last);
+        s = render_statement_fragment(start, last);
 
         emit(s);
         emit(";\n");
@@ -800,6 +1012,7 @@ class Transpiler {
         if (is("struct")) { parse_struct(); return; }
         if (is("enum")) { parse_enum(); return; }
         if (is("extern_type")) { parse_extern_type(); return; }
+        if (is("cinclude")) { parse_cinclude(); return; }
         if (is("namespace")) {
             ++i;
             std::size_t start = i;

@@ -1,6 +1,6 @@
 # Rexon
 
-Rexon es un lenguaje pequeño que se transpila a C++26. El compilador se llama
+Rexon 1.0 es un lenguaje pequeño que se transpila a C++26. El compilador se llama
 `rexonc` y usa `clang++` para generar el ejecutable final.
 
 ## Compilar el compilador
@@ -208,9 +208,9 @@ resize(&ok) int[+2]{values, 40, 50};
 delete values;
 ```
 
-`int[]` representa un array dinámico con los campos `.data` y `.size`. También
-dispone de `.size()` e `.is_valid_idx(i)` para consultar su tamaño y validar un
-índice antes de accederlo. Los arrays fijos ofrecen las mismas operaciones.
+`int[]` representa un array dinámico con el campo `.data` y el método `.size()`.
+También dispone de `.is_valid_idx(i)` para consultar un índice antes de
+accederlo. Los arrays fijos ofrecen las mismas operaciones.
 `resize(&ok) int[+n]{array, valores...}` agrega `n` posiciones y puede
 inicializar algunas de ellas.
 
@@ -230,17 +230,50 @@ Los builtins proporcionados por el runtime son:
 int converted = @cast(int, value);
 @exit(1);
 
-bool exists = @fexits("file.txt");
+bool exists = @fexists("file.txt");
 auto contents = @fread("file.txt");
 auto written = @fwrite("file.txt", "hello");
 auto appended = @fappend("file.txt", " world");
+auto user_entry = @getline();
+
+int status = @shell("echo hola");
+@shell("bash", "echo ejecutado con bash");
 ```
+
+`@shell` ejecuta un comando y devuelve su código de salida. Con un solo
+argumento usa el intérprete predeterminado del sistema; con dos argumentos se
+puede elegir `bash`, `zsh`, `cmd`, `powershell` o `pwsh`.
+
+Las lambdas usan parámetros tipados y pueden indicar su retorno explícitamente:
+
+```rexon
+auto add = fn(int a, int b) int {
+    return a + b;
+};
+
+auto log = fn(int code, char[] message, c_int flags) void {
+    @print("{} {} {}\n", code, message, flags);
+};
+```
+
+Capturan por referencia el entorno donde se crean y se convierten en lambdas
+C++ durante la transpilación.
 
 `@cpp("...")` inserta código C++ directamente en el archivo generado:
 
 ```rexon
 @cpp("static_assert(sizeof(int) >= 4);");
 ```
+
+Para incluir headers de C o C++ se puede usar `cinclude` en el nivel superior:
+
+```rexon
+cinclude "mi_header.h";
+cinclude <vector>;
+```
+
+La primera forma genera `#include "mi_header.h"` y la segunda genera
+`#include <vector>` en el C++ transpilado.
 
 El formato de `@print` usa `{}` como marcador de posición. `@assert` lanza un
 fallo durante `--test` y usa una aserción en una ejecución normal.
@@ -283,6 +316,40 @@ namespace app {
 }
 ```
 
+### RexLib
+
+El directorio `RexLib/` incluye módulos listos para importar con `-I`:
+
+- `math`: operaciones numéricas, conversiones de ángulos y aritmética segura.
+- `collections`: suma, producto, búsqueda y conteo para arrays de enteros.
+- `char`: clasificación ASCII, conversión de mayúsculas/minúsculas y dígitos
+  hexadecimales.
+- `string`: longitud, comparación, prefijos, sufijos y búsqueda sobre slices
+  `char#[]` sin depender de terminadores NUL.
+- `memory`: operaciones explícitas sobre buffers de enteros y punteros.
+- `graphics`: tipos `rexgfx::vec2`, `rect`, `circle` y `color`, además de
+  distancia, producto punto, colisiones y mezcla de colores.
+- `color`: colores RGBA predefinidos y composición alfa.
+- `easing`: interpolaciones para animaciones y transiciones.
+
+`math` también incluye `gcd`, `lcm`, `fibonacci`, `is_prime`,
+`next_power_of_two` y `wrap`, todos con resultados opcionales cuando una
+operación puede desbordar o no tiene sentido.
+
+Los módulos `char`, `string` y `memory` no esconden la propiedad de memoria:
+los punteros reservados con `new` deben liberarse con `delete` por el código que
+los creó.
+
+```rexon
+import graphics;
+rexgfx::vec2 player = rexgfx::vec(10.0, 4.0);
+rexgfx::rect screen = rexgfx::make_rect(0.0, 0.0, 800.0, 600.0);
+@assert(rexgfx::contains(screen, player), "player fuera de pantalla");
+```
+
+El runtime ofrece `@cwd()`, `@env(name)`, `@mkdir(path)`, `@remove(path)` y
+`@sleep(milliseconds)` para programas que necesitan interactuar con su entorno.
+
 ## Tests
 
 Declara tests con un nombre descriptivo:
@@ -309,6 +376,8 @@ Ejecuta solo uno:
 
 ```text
 rexonc [-I dir] [-o output]
+       [-c]
+       [--check] [--version]
        [--test [--unique-test name]]
        [--emit-cpp] [--keep-temp] [--tokens]
        [--get-std-hpp]
@@ -316,9 +385,14 @@ rexonc [-I dir] [-o output]
 ```
 
 - `-I dir`: agrega un directorio de búsqueda para imports y headers.
-- `-o output`: define el nombre del ejecutable o del C++ generado.
+- `-c`: compila solamente a un archivo objeto (`.o` o `.obj`); sin `-o`, usa
+  el nombre de entrada con extensión `.o`.
+- `-o output`: define el nombre del ejecutable o del C++ generado. Si termina
+  en `.o` o `.obj`, compila un archivo objeto en lugar de enlazar un ejecutable.
 - `--test`: compila y ejecuta los bloques `test`.
 - `--unique-test name`: ejecuta solo el test indicado.
+- `--check`: transpila y valida todos los módulos sin invocar el compilador C++.
+- `--version`: muestra la versión del compilador (`1.0.0`).
 - `--emit-cpp`: genera C++ y no invoca `clang++`.
 - `--keep-temp`: conserva los archivos temporales del runtime.
 - `--tokens`: imprime los tokens lexados en `stderr`.

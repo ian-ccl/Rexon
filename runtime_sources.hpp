@@ -5,6 +5,7 @@ namespace rexon_sources {
 inline constexpr std::string_view std_hpp = R"REXON(
 #pragma once
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -22,42 +23,49 @@ inline constexpr std::string_view std_hpp = R"REXON(
 #include <string>
 #include <string_view>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 namespace rexon {
     inline bool test_mode = false;
+    // Rexon integer aliases with platform-independent widths.
+    using int64 = std::int64_t;
+    using uint64 = std::uint64_t;
+    using ssize_t = std::make_signed_t<std::size_t>;
+
     // C's `int` type, exposed explicitly for C interop declarations.
     using c_int = int;
-
-    // Callable size value: it keeps the legacy `.size` field syntax working
-    // while also allowing the method-style `.size()` API.
-    struct SizeValue {
-        std::size_t value{};
-        constexpr SizeValue() = default;
-        constexpr SizeValue(std::size_t v) : value(v) {}
-        constexpr operator std::size_t() const { return value; }
-        constexpr std::size_t operator()() const { return value; }
-        constexpr SizeValue& operator=(std::size_t v) {
-            value = v;
-            return *this;
-        }
-    };
 
     template<class T>
     struct Slice {
         T* data{};
-        SizeValue size{};
+    private:
+        std::size_t length_{};
+
+    public:
+        constexpr Slice() = default;
+        constexpr Slice(T* pointer, std::size_t length) : data(pointer), length_(length) {}
+        template<std::size_t N>
+        Slice(const std::remove_cv_t<T> (&value)[N]) : data(value), length_(N) {
+            if constexpr (std::is_same_v<std::remove_cv_t<T>, char>) {
+                if (length_ && value[length_ - 1] == '\0') length_ -= 1;
+            }
+        }
+        constexpr std::size_t size() const { return length_; }
         T& operator[](std::size_t i) const { return data[i]; }
         T* begin() const { return data; }
-        T* end() const { return data + size; }
-        constexpr bool is_valid_idx(std::size_t i) const { return i < size(); }
+        T* end() const { return data + length_; }
+        constexpr bool is_valid_idx(std::size_t i) const { return i < length_; }
         friend std::ostream& operator<<(std::ostream& os, const Slice& slice) {
             if constexpr (std::is_same_v<std::remove_cv_t<T>, char>) {
-                for (std::size_t i = 0; i < slice.size; ++i) os << slice.data[i];
+                for (std::size_t i = 0; i < slice.length_; ++i) os << slice.data[i];
             } else {
-                for (std::size_t i = 0; i < slice.size; ++i) {
+                for (std::size_t i = 0; i < slice.length_; ++i) {
                     if (i) os << ", ";
                     os << slice.data[i];
                 }
@@ -163,7 +171,7 @@ namespace rexon {
 
     template<class T>
     inline void delete_array(Slice<T>& slice) noexcept {
-        if (!slice.data) { slice.size = 0; return; }
+        if (!slice.data) { slice = {}; return; }
         AllocationHeader* h = allocation_header(slice.data);
         if (!h || h->kind != AllocationKind::array) return;
         for (std::size_t i = 0; i < h->count; ++i)
@@ -182,28 +190,28 @@ namespace rexon {
     inline void resize_append(bool* ok, Slice<T>& slice, std::size_t added,
                               std::initializer_list<T> appended) noexcept {
         if (ok) *ok = false;
-        if (added > std::numeric_limits<std::size_t>::max() - slice.size ||
+        if (added > std::numeric_limits<std::size_t>::max() - slice.size() ||
             appended.size() > added || !slice.data) return;
         AllocationHeader* old = allocation_header(slice.data);
-        if (!old || old->kind != AllocationKind::array || old->count != slice.size)
+        if (!old || old->kind != AllocationKind::array || old->count != slice.size())
             return;
         if constexpr (!std::is_nothrow_constructible_v<T, const T&> ||
                       !std::is_nothrow_default_constructible_v<T>) return;
-        T* replacement = allocate_storage<T>(ok, slice.size + added,
+        T* replacement = allocate_storage<T>(ok, slice.size() + added,
                                               AllocationKind::array);
         if (!replacement) return;
         std::size_t built = 0;
-        for (; built < slice.size; ++built)
+        for (; built < slice.size(); ++built)
             ::new (static_cast<void*>(replacement + built)) T(slice.data[built]);
         std::size_t appended_count = 0;
         for (const T& value : appended)
             ::new (static_cast<void*>(replacement + built + appended_count++)) T(value);
-        for (; built + appended_count < slice.size + added; ++built)
+        for (; built + appended_count < slice.size() + added; ++built)
             ::new (static_cast<void*>(replacement + built)) T();
         for (std::size_t i = 0; i < old->count; ++i) old->destroy(slice.data + i);
         unlink_allocation(old);
         std::free(static_cast<void*>(old));
-        slice = {replacement, slice.size + added};
+        slice = {replacement, slice.size() + added};
         if (ok) *ok = true;
     }
 
@@ -295,6 +303,12 @@ namespace rexon {
         std::printf("%s", out.str().c_str());
     }
 
+    inline std::string getline() {
+        std::string line;
+        std::getline(std::cin, line);
+        return line;
+    }
+
     inline std::optional<std::vector<char>> fread_all(const char* path) {
         std::ifstream f(path, std::ios::binary);
         if (!f) return std::nullopt;
@@ -323,6 +337,85 @@ namespace rexon {
 
     inline bool fexits(const char* path) {
         return std::filesystem::exists(path);
+    }
+
+    // Correctly-spelled alias kept alongside fexits for compatibility.
+    inline bool fexists(const char* path) {
+        return fexits(path);
+    }
+
+    inline std::string cwd() {
+        return std::filesystem::current_path().string();
+    }
+
+    inline std::string env(const char* name) {
+        if (!name) return {};
+        const char* value = std::getenv(name);
+        return value ? value : "";
+    }
+
+    inline bool mkdir_all(const char* path) {
+        if (!path) return false;
+        std::error_code ec;
+        return std::filesystem::create_directories(path, ec) ||
+               (std::filesystem::is_directory(path, ec) && !ec);
+    }
+
+    inline bool remove_file(const char* path) {
+        if (!path) return false;
+        std::error_code ec;
+        return std::filesystem::remove(path, ec) && !ec;
+    }
+
+    inline void sleep_ms(std::int64_t milliseconds) {
+        if (milliseconds <= 0) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+    }
+
+    inline int shell_status(int status) {
+        if (status == -1) return -1;
+#ifdef _WIN32
+        return status;
+#else
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+        return status;
+#endif
+    }
+
+    inline std::string shell_quote(const char* command) {
+        std::string quoted = "'";
+        if (command) {
+            for (char c = *command; c; c = *++command) {
+                if (c == '\'') quoted += "'\\''";
+                else quoted += c;
+            }
+        }
+        return quoted + "'";
+    }
+
+    // Execute with the platform's default command interpreter, or explicitly
+    // with bash, zsh, cmd, powershell, or pwsh. The command's stdout/stderr
+    // remain attached to the Rexon process and the normalized exit code is
+    // returned to the caller.
+    inline int shell(const char* command) {
+        return shell_status(std::system(command ? command : ""));
+    }
+
+    inline int shell(const char* interpreter, const char* command) {
+        if (!interpreter || !command) return -1;
+        std::string name(interpreter);
+        std::string invocation;
+        if (name == "bash" || name == "zsh") {
+            invocation = name + " -c " + shell_quote(command);
+        } else if (name == "powershell" || name == "pwsh") {
+            invocation = name + " -NoProfile -Command " + shell_quote(command);
+        } else if (name == "cmd") {
+            invocation = "cmd /C \"" + std::string(command) + "\"";
+        } else {
+            return -1;
+        }
+        return shell_status(std::system(invocation.c_str()));
     }
 
     inline void assert_that(bool condition, const char* message) {

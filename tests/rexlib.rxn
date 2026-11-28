@@ -1,0 +1,74 @@
+import graphics;
+import color;
+import easing;
+import math;
+import collections;
+import char;
+import string;
+import memory;
+
+test "RexLib geometry and animation" {
+    rexgfx::vec2 origin = rexgfx::vec(0.0, 0.0);
+    rexgfx::vec2 point = rexgfx::vec(3.0, 4.0);
+    @assert(rexgfx::distance(origin, point) > 4.99 &&
+            rexgfx::distance(origin, point) < 5.01, "vector distance");
+
+    rexgfx::rect box = rexgfx::make_rect(0.0, 0.0, 10.0, 10.0);
+    @assert(rexgfx::contains(box, point), "rectangle contains point");
+    @assert(rexease::smooth(0.0) == 0.0 && rexease::smooth(1.0) == 1.0,
+            "smooth endpoints");
+
+    rexgfx::color mixed = rexcolor::blend(rexcolor::black(), rexcolor::red());
+    @assert(mixed.r > 0.99 && mixed.a > 0.99, "color blend");
+    @assert(rexmath::is_even(4) && rexmath::is_odd(3), "integer parity");
+}
+
+test "RexLib number theory and collections" {
+    @assert(rexmath::gcd(84, 30) == 6, "greatest common divisor");
+    int? least = rexmath::lcm(6, 8);
+    int? fib = rexmath::fibonacci(10);
+    @assert(least.? == 24, "least common multiple");
+    @assert(fib.? == 55, "fibonacci");
+    @assert(rexmath::is_prime(97) && !rexmath::is_prime(99), "prime test");
+    int? power = rexmath::next_power_of_two(17);
+    @assert(power.? == 32, "power of two");
+
+    bool ok = false;
+    int[] values = new(&ok) int[]{2, 3, 2, 5};
+    @assert(ok, "integer collection allocation");
+    int? found = rexcollections::index_of(values, 5);
+    @assert(rexcollections::sum(values) == 12 &&
+            rexcollections::product(values) == 60 &&
+            rexcollections::count(values, 2) == 2 &&
+            found.? == 3,
+            "integer collection helpers");
+    delete values;
+}
+
+test "Rexon runtime helpers" {
+    auto location = @cwd();
+    auto path = @env("PATH");
+    @assert(location.size() > 0 && path.size() > 0, "environment helpers");
+}
+
+test "RexLib chars strings and memory" {
+    @assert(rexchar::is_alpha('R') && rexchar::is_digit('7'), "character classes");
+    int? hexadecimal = rexchar::hex_value('f');
+    @assert(rexchar::to_lower('R') == 'r' && hexadecimal.? == 15,
+            "character conversions");
+
+    @assert(rexstring::equals("rexon", "rexon") &&
+            rexstring::starts_with("rexon 1.0", "rexon") &&
+            rexstring::ends_with("rexon 1.0", "1.0"), "string matching");
+    int? position = rexstring::find_char("hello", 'l');
+    @assert(rexstring::length("hello") == 5 && position.? == 2 &&
+            rexstring::count_char("hello", 'l') == 2, "string search");
+
+    bool ok = false;
+    int* first = new(&ok) int{10};
+    int* second = new(&ok) int{20};
+    @assert(ok && rexmemory::swap_int(first, second) && *first == 20 && *second == 10,
+            "pointer swap");
+    delete first;
+    delete second;
+}

@@ -12,7 +12,7 @@ test "dynamic memory" {
     @assert(ok && values.size() == 6 && values[0] == 10 && values[4] == 50,
             "resize array");
     resize(&ok) int[+18446744073709551615]{values};
-    @assert(!ok && values.size == 6 && values[4] == 50,
+    @assert(!ok && values.size() == 6 && values[4] == 50,
             "resize allocation failure");
     delete values;
     delete values;
